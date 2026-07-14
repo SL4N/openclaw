@@ -225,7 +225,6 @@ export function listWatchedSessionUpstreamLinks(
   options: OpenClawStateDatabaseOptions = {},
 ): Map<string, SessionUpstreamLink[]> {
   const grouped = new Map<string, SessionUpstreamLink[]>();
-  const seenSessionKeys = new Set<string>();
   try {
     const { db } = openOpenClawStateDatabase(options);
     // Watch cursors own demand. Unwatched adopted sessions stay out of the polling hot path.
@@ -247,17 +246,21 @@ export function listWatchedSessionUpstreamLinks(
         .orderBy("links.catalog_id", "asc")
         .orderBy("links.session_key", "asc"),
     ).rows;
-    for (const row of rows) {
-      const link = rowToSessionUpstreamLink(row);
-      // Fail closed on the single-agent-per-key invariant: never probe a second
-      // agent's link for the same key against a key-only watch cursor.
-      if (seenSessionKeys.has(link.sessionKey)) {
+    const links = rows.map(rowToSessionUpstreamLink);
+    // Fail closed on the single-agent-per-key invariant: the key-only cursor join
+    // cannot disambiguate two agents sharing a bare adopted key, so drop EVERY link
+    // for any duplicated key rather than probe an arbitrary agent's upstream.
+    const keyCounts = new Map<string, number>();
+    for (const link of links) {
+      keyCounts.set(link.sessionKey, (keyCounts.get(link.sessionKey) ?? 0) + 1);
+    }
+    for (const link of links) {
+      if ((keyCounts.get(link.sessionKey) ?? 0) > 1) {
         log.warn(
-          `skipping ambiguous upstream link for ${link.sessionKey}: multiple agents adopt the same key`,
+          `skipping ambiguous upstream links for ${link.sessionKey}: multiple agents adopt the same key`,
         );
         continue;
       }
-      seenSessionKeys.add(link.sessionKey);
       const catalogLinks = grouped.get(link.catalogId) ?? [];
       catalogLinks.push(link);
       grouped.set(link.catalogId, catalogLinks);

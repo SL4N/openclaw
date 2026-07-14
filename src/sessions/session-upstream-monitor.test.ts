@@ -119,11 +119,12 @@ describe("session upstream monitor", () => {
       }),
     );
     expect(events[0]?.payload).toBeUndefined();
-    expect(
-      openOpenClawStateDatabase(database)
-        .db.prepare("SELECT dedupe_key FROM session_state_events WHERE session_key = ?")
-        .get(watched),
-    ).toEqual({ dedupe_key: `upstream:${watched}:8` });
+    const dedupeRow = openOpenClawStateDatabase(database)
+      .db.prepare("SELECT dedupe_key FROM session_state_events WHERE session_key = ?")
+      .get(watched) as { dedupe_key: string };
+    // Source identity is hashed into the dedupe key so a rebased source cannot
+    // collide with a prior source's activity id.
+    expect(dedupeRow.dedupe_key).toMatch(new RegExp(`^upstream:${watched}:[0-9a-f]{16}:8$`));
   });
 
   it("clamps skewed upstream event times without touching bookkeeping clocks", async () => {

@@ -1,4 +1,5 @@
 /** Polls watched adopted sessions for direct upstream human activity. */
+import { createHash } from "node:crypto";
 import { isEmbeddedAgentRunActive } from "../agents/embedded-agent.js";
 import { loadSessionEntry } from "../config/sessions/session-accessor.js";
 import { resolveSessionStorePathForScope } from "../config/sessions/session-store-path.js";
@@ -49,6 +50,21 @@ function databaseOptions(options: SessionUpstreamMonitorOptions): OpenClawStateD
 
 function normalizeUserText(text: string): string {
   return text.trim().replace(/\s+/g, " ");
+}
+
+// Stable identity of the physical upstream source (host/thread/ref). A re-Continue
+// can rebase a session onto a new source whose activity ids (e.g. Claude byte
+// offsets) collide with the old source; hashing this into dedupe keys and the CAS
+// keeps those from silently deduping genuine new activity or accepting a stale scan.
+function upstreamSourceKey(probe: {
+  hostId: string;
+  threadId: string;
+  upstreamRef: unknown;
+}): string {
+  return createHash("sha256")
+    .update(`${probe.hostId}\u0000${probe.threadId}\u0000${JSON.stringify(probe.upstreamRef)}`)
+    .digest("hex")
+    .slice(0, 16);
 }
 
 async function loadOwnRecentUserTexts(
@@ -174,7 +190,18 @@ export async function runSessionUpstreamMonitorTick(
         // neither record from the old source nor clobber the refreshed marker.
         const expectedUpdatedAt = linkUpdatedAtBySessionKey.get(activity.sessionKey);
         const currentLink = readSessionUpstreamLink(probe.sessionKey, probe.agentId, dbOptions);
-        if (!currentLink || currentLink.updatedAt !== expectedUpdatedAt) {
+        // Compare source identity too: a same-millisecond Continue can refresh the
+        // row without changing updated_at, so the timestamp alone is not a reliable
+        // optimistic lock.
+        if (
+          !currentLink ||
+          currentLink.updatedAt !== expectedUpdatedAt ||
+          upstreamSourceKey({
+            hostId: currentLink.hostId,
+            threadId: currentLink.threadId,
+            upstreamRef: currentLink.upstreamRef,
+          }) !== upstreamSourceKey(probe)
+        ) {
           continue;
         }
         if (activity.humanTurns === 0) {
@@ -194,7 +221,7 @@ export async function runSessionUpstreamMonitorTick(
             agentId: probe.agentId,
             actor: { actorType: "human" },
             channel: catalogId,
-            dedupeKey: `upstream:${probe.sessionKey}:${activity.dedupeId}`,
+            dedupeKey: `upstream:${probe.sessionKey}:${upstreamSourceKey(probe)}:${activity.dedupeId}`,
             ...(activity.humanTurns > 1 ? { payload: { turns: activity.humanTurns } } : {}),
             occurredAt: activity.occurredAt as number,
           },
