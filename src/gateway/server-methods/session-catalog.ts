@@ -259,6 +259,10 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
           afterBind: result.afterConversationBound,
         });
       }
+      // Adopted sessions are created under the resolved default store agent, so the
+      // key-derived agent matches the owning agent. Provider-authoritative agent
+      // identity (a `SessionCatalogContinueProviderResult.agentId`) is a follow-up
+      // that would let adapters adopt under non-default agents; see issue tracker.
       const agentId = resolveAgentIdFromSessionKey(result.sessionKey);
       if (result.upstream) {
         // Links exist only for adoptions made on this version: pre-upgrade adopted

@@ -105,6 +105,7 @@ Current limits:
 - Paired-node Claude checks classify the latest 50 transcript items per cadence. Larger bursts can fall outside the v1 scan window.
 - Catalog sessions that have not been adopted remain outside the awareness layer in v1.
 - Sessions adopted before this feature carry no upstream link; continue them from the catalog once to start upstream monitoring.
+- Upstream links assume each adopted session key maps to one owning agent (adoption uses the default store agent). Multi-agent adoption of the same external thread is not monitored in v1.
 
 ## Related
 
