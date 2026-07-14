@@ -43,7 +43,6 @@ import {
   adoptedSourceKey,
   adoptionSessionKeyRest,
   continueOperations,
-  lastTerminalTurnId,
   listNodeAdoptedSessionEntries,
   listSupervisionAgentIds,
   runSessionActionExclusive,
@@ -100,6 +99,7 @@ import * as upstream from "./session-upstream-activity.js";
 import {
   codexLastTerminalTurnId,
   codexUpstreamBaseline,
+  codexUpstreamContinueResult,
   type CodexUpstreamBaseline,
 } from "./session-upstream-marker.js";
 
