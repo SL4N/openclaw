@@ -35,8 +35,6 @@ Docs: https://docs.openclaw.ai
 
 ### Fixes
 
-- **Group session sender context:** replay persisted group and channel sender attribution to the model on later turns so agents can answer who said what across Signal, WhatsApp, and other shared sessions without channel-specific memory. Thanks @pdurlej.
-
 - **ClawHub plugin API ranges:** delegate each supported comparator to `semver` so tilde, partial-wildcard, and prerelease caret bounds are correct while preserving OpenClaw version normalization and the existing restricted range grammar. (#106877)
 - **Web Readability relative links:** seed parsed documents with the request URL so article links resolve correctly while removing the plugin's duplicate lazy-loader facade. (#106860)
 - **Browser auto-routing:** fall back to the Gateway host when an implicitly selected browser node reports that its control host is unreachable, while preserving explicit node pins and ambiguous action failures.
