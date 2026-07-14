@@ -8,6 +8,7 @@ import {
   checkClaudeSessionUpstreamActivity,
   checkClaudeUpstreamActivity,
   link,
+  linkContinued,
 } from "./session-upstream-activity.js";
 
 const tempDirs: string[] = [];
@@ -290,5 +291,26 @@ describe("Claude upstream activity", () => {
     });
     expect(sizeResult).toEqual(offsetResult);
     expect(offsetResult?.nextMarker).toEqual({ offset: (await fs.stat(filePath)).size });
+  });
+  it("declines a remote link when the newest history item lacks a UUID", async () => {
+    const readRemote = async () => [{ type: "userMessage", text: "hi" }] as never;
+    const declined = await linkContinued({
+      sessionKey: "agent:main:adopted",
+      hostId: "node:devbox",
+      threadId: "thread-1",
+      listLocalSessions: async () => [],
+      readRemote,
+    });
+    // UUID-less newest item cannot baseline safely; no upstream link is seeded.
+    expect(declined).toEqual({ sessionKey: "agent:main:adopted" });
+
+    const linked = await linkContinued({
+      sessionKey: "agent:main:adopted",
+      hostId: "node:devbox",
+      threadId: "thread-1",
+      listLocalSessions: async () => [],
+      readRemote: async () => [{ type: "userMessage", text: "hi", uuid: "u-9" }] as never,
+    });
+    expect(linked.upstream?.marker).toEqual({ uuid: "u-9" });
   });
 });

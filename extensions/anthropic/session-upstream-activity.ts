@@ -72,11 +72,18 @@ export async function linkContinued(params: {
   }
   try {
     const items = params.history ?? (await params.readRemote());
+    const newest = items[0];
+    // A UUID-less newest item cannot anchor a baseline distinguishable from an empty
+    // thread, which would later replay pre-adoption history as new activity. Decline
+    // the link; empty history (no newest) still baselines safely as null.
+    if (newest && !newest.uuid) {
+      return { sessionKey: params.sessionKey };
+    }
     return linkRemote(
       params.sessionKey,
       params.hostId.slice("node:".length),
       params.threadId,
-      items[0]?.uuid ?? null,
+      newest?.uuid ?? null,
     );
   } catch {
     return { sessionKey: params.sessionKey };

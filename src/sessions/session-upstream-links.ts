@@ -225,9 +225,14 @@ export function listWatchedSessionUpstreamLinks(
   options: OpenClawStateDatabaseOptions = {},
 ): Map<string, SessionUpstreamLink[]> {
   const grouped = new Map<string, SessionUpstreamLink[]>();
+  const seenSessionKeys = new Set<string>();
   try {
     const { db } = openOpenClawStateDatabase(options);
     // Watch cursors own demand. Unwatched adopted sessions stay out of the polling hot path.
+    // The join matches on session_key only, which is unambiguous because adoption creates
+    // links under the single resolved store agent (one row per session_key). The seen-key
+    // guard below fails closed if a future multi-agent adoption ever breaks that invariant,
+    // so a cross-agent link can never be probed against another agent's watch cursor.
     const rows = executeSqliteQuerySync(
       db,
       getSessionUpstreamKysely(db)
@@ -244,6 +249,15 @@ export function listWatchedSessionUpstreamLinks(
     ).rows;
     for (const row of rows) {
       const link = rowToSessionUpstreamLink(row);
+      // Fail closed on the single-agent-per-key invariant: never probe a second
+      // agent's link for the same key against a key-only watch cursor.
+      if (seenSessionKeys.has(link.sessionKey)) {
+        log.warn(
+          `skipping ambiguous upstream link for ${link.sessionKey}: multiple agents adopt the same key`,
+        );
+        continue;
+      }
+      seenSessionKeys.add(link.sessionKey);
       const catalogLinks = grouped.get(link.catalogId) ?? [];
       catalogLinks.push(link);
       grouped.set(link.catalogId, catalogLinks);
