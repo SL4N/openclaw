@@ -10,7 +10,6 @@ import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
 import type {
   SessionCatalogHost,
   SessionCatalogProvider,
-  SessionCatalogTranscriptItem,
 } from "openclaw/plugin-sdk/session-catalog";
 import { resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -86,6 +85,7 @@ import {
   toCatalogSession,
   unwrapNodeInvokePayload,
 } from "./session-catalog-parsing.js";
+import { toGenericTranscriptItem } from "./session-catalog-transcript-item.js";
 import type {
   CodexSessionCatalogHost,
   CodexSessionCatalogPage,
@@ -95,6 +95,12 @@ import type {
   CodexSessionCatalogSession,
   CodexSessionTranscriptPage,
 } from "./session-catalog-types.js";
+import * as upstream from "./session-upstream-activity.js";
+import {
+  codexLastTerminalTurnId,
+  codexUpstreamBaseline,
+  type CodexUpstreamBaseline,
+} from "./session-upstream-marker.js";
 
 const CODEX_APP_SERVER_THREADS_CAPABILITY = "codex-app-server-threads";
 const CODEX_SUPERVISION_SESSION_KEY_PREFIX = "harness:codex:supervision:";
@@ -103,7 +109,7 @@ export { CODEX_SESSION_CATALOG_MAX_PAGE_LIMIT } from "./session-catalog-parsing.
 
 export const CODEX_LOCAL_SESSION_HOST_ID = "gateway:local";
 
-type CodexSessionCatalogControl = {
+export type CodexSessionCatalogControl = {
   connectionFingerprint?: string;
   withPinnedConnection<T>(run: (control: CodexSessionCatalogControl) => Promise<T>): Promise<T>;
   listPage(params: CodexSessionCatalogPageParams): Promise<CodexSessionCatalogPage>;
@@ -688,9 +694,11 @@ async function listAdoptedSessionEntries(params: {
         sessionBindingIdentity({ sessionId, sessionKey, config: params.config }),
       );
       const sourceThreadId = binding?.supervisionSourceThreadId?.trim();
+      const boundThreadId = binding?.threadId.trim();
       if (
         binding?.connectionScope !== "supervision" ||
         !sourceThreadId ||
+        !boundThreadId ||
         sessionKeyRest !== adoptionSessionKey(sourceThreadId)
       ) {
         continue;
@@ -698,7 +706,7 @@ async function listAdoptedSessionEntries(params: {
       if (adopted.has(sourceThreadId)) {
         throw new Error(`multiple OpenClaw sessions adopt Codex thread ${sourceThreadId}`);
       }
-      adopted.set(sourceThreadId, { key: sessionKey, sessionId, agentId });
+      adopted.set(sourceThreadId, { key: sessionKey, sessionId, agentId, boundThreadId });
     }
   }
   return adopted;
@@ -885,7 +893,9 @@ async function createOrReuseAdoptedSession(params: {
   try {
     const label = params.sourceThread.name?.trim() || undefined;
     const spawnedCwd = params.sourceThread.cwd?.trim() || undefined;
-    const pendingLastTurnId = lastTerminalTurnId(params.sourceThread);
+    const pendingLastTurnId = codexLastTerminalTurnId(params.sourceThread, (value) =>
+      boundedCatalogString(value, MAX_SESSION_ID_LENGTH),
+    );
     const marker: CodexSupervisionMarker = { sourceThreadId: params.sourceThread.id };
     const created = await params.api.runtime.agent.session.createSessionEntry({
       cfg: params.config,
@@ -952,7 +962,12 @@ async function createOrReuseAdoptedSession(params: {
         };
       },
     });
-    return { key: created.key, sessionId: created.sessionId, agentId: created.agentId };
+    return {
+      key: created.key,
+      sessionId: created.sessionId,
+      agentId: created.agentId,
+      boundThreadId: params.sourceThread.id,
+    };
   } catch (error) {
     // Concurrent/retried Continue calls converge on the same trusted marker.
     // An unrelated entry at the deterministic key is never overwritten.
@@ -993,6 +1008,7 @@ async function continueLocalCodexSessionInner(params: {
   config: OpenClawConfig;
   control: CodexSessionCatalogControl;
   threadId: string;
+  onContinued?: (upstream: CodexUpstreamBaseline & { connectionFingerprint: string }) => void;
 }): Promise<{ sessionKey: string; disposition: CodexSessionDisposition }> {
   await requireCatalogEligibleThread(params.control, params.threadId);
   const existing = await findAdoptedSessionEntry({
@@ -1002,8 +1018,11 @@ async function continueLocalCodexSessionInner(params: {
     threadId: params.threadId,
   });
   if (existing) {
-    const sourceThread = await params.control.readThread(params.threadId, false);
-    if (sourceThread.id !== params.threadId) {
+    // Local adoptions always carry a bound thread; fall back to the source thread
+    // for defensive completeness (node entries never reach this local path).
+    const boundThreadId = existing.boundThreadId ?? params.threadId;
+    const boundThread = await params.control.readThread(boundThreadId, true);
+    if (boundThread.id !== boundThreadId) {
       throw new Error("Codex app-server returned a different thread than requested");
     }
     // Catalog state can race archive/reset. Restore only the same locked generation
@@ -1029,6 +1048,15 @@ async function continueLocalCodexSessionInner(params: {
     if (!restored) {
       throw changedError();
     }
+    const connectionFingerprint = params.control.connectionFingerprint;
+    if (connectionFingerprint) {
+      params.onContinued?.({
+        connectionFingerprint,
+        ...codexUpstreamBaseline(boundThread, (value) =>
+          boundedCatalogString(value, MAX_SESSION_ID_LENGTH),
+        ),
+      });
+    }
     return { sessionKey: existing.key, disposition: "existing" };
   }
 
@@ -1050,6 +1078,20 @@ async function continueLocalCodexSessionInner(params: {
     sourceThread,
     connectionFingerprint,
   });
+  const boundThreadId = adopted.boundThreadId ?? sourceThread.id;
+  const baselineThread =
+    boundThreadId === sourceThread.id
+      ? sourceThread
+      : await params.control.readThread(boundThreadId, true);
+  if (baselineThread.id !== boundThreadId) {
+    throw new Error("Codex app-server returned a different thread than requested");
+  }
+  params.onContinued?.({
+    connectionFingerprint,
+    ...codexUpstreamBaseline(baselineThread, (value) =>
+      boundedCatalogString(value, MAX_SESSION_ID_LENGTH),
+    ),
+  });
   return { sessionKey: adopted.key, disposition: "forked" };
 }
 
@@ -1060,6 +1102,7 @@ async function continueLocalCodexSession(params: {
   config: OpenClawConfig;
   control: CodexSessionCatalogControl;
   threadId: string;
+  onContinued?: (upstream: CodexUpstreamBaseline & { connectionFingerprint: string }) => void;
 }): Promise<{ sessionKey: string; disposition: CodexSessionDisposition }> {
   const sourceKey = adoptedSourceKey(CODEX_LOCAL_SESSION_HOST_ID, params.threadId);
   const current = continueOperations.get(sourceKey);
@@ -1214,50 +1257,6 @@ function toGenericCatalogHost(host: CodexSessionCatalogHost): SessionCatalogHost
   };
 }
 
-const CODEX_MESSAGE_TYPES = new Map<string, SessionCatalogTranscriptItem["type"]>([
-  ["userMessage", "userMessage"],
-  ["agentMessage", "agentMessage"],
-  ["reasoning", "reasoning"],
-]);
-
-const CODEX_TOOL_TYPES = new Set([
-  "commandExecution",
-  "fileChange",
-  "mcpToolCall",
-  "dynamicToolCall",
-  "collabAgentToolCall",
-  "webSearch",
-  "imageView",
-  "imageGeneration",
-]);
-
-function toGenericTranscriptItem(item: import("./app-server/protocol.js").CodexThreadItem) {
-  let type = CODEX_MESSAGE_TYPES.get(item.type);
-  if (!type && CODEX_TOOL_TYPES.has(item.type)) {
-    const hasResult = item.result !== undefined || Boolean(item.aggregatedOutput);
-    type = hasResult ? "toolResult" : "toolCall";
-  }
-  type ??= "other";
-  const fallback = item.title ?? item.name ?? item.tool ?? item.command ?? item.query ?? undefined;
-  const resultText =
-    item.aggregatedOutput ||
-    (item.result === undefined ? undefined : JSON.stringify(item.result, null, 2));
-  // fileChange items carry only a changes array; render it so edits are not
-  // reduced to an unsupported-item placeholder. The protocol type declares
-  // changes as always present, but raw projections can omit it.
-  const changesText = Array.isArray(item.changes)
-    ? item.changes.map((change) => `${change.kind}: ${change.path}`).join("\n") || undefined
-    : undefined;
-  const text = item.text || resultText || changesText || fallback;
-  return {
-    id: item.id,
-    type,
-    ...(text ? { text } : {}),
-    raw: item as SessionCatalogTranscriptItem["raw"],
-  } satisfies SessionCatalogTranscriptItem;
-}
-
-/** Registers the generic session catalog while preserving node command contracts. */
 function registerCodexSessionCatalog(params: {
   api: OpenClawPluginApi;
   bindingStore: CodexAppServerBindingStore;
@@ -1305,15 +1304,37 @@ function registerCodexSessionCatalog(params: {
       if (request.hostId !== CODEX_LOCAL_SESSION_HOST_ID) {
         throw new CatalogParamsError("Codex session catalog hostId is invalid");
       }
+      let upstreamBaseline: (CodexUpstreamBaseline & { connectionFingerprint: string }) | undefined;
       const continued = await continueLocalCodexSession({
         api: params.api,
         bindingStore: params.bindingStore,
         config,
         control: params.control,
         threadId: request.threadId,
+        onContinued: (baseline) => {
+          upstreamBaseline = baseline;
+        },
       });
-      return { sessionKey: continued.sessionKey };
+      return {
+        sessionKey: continued.sessionKey,
+        ...(upstreamBaseline
+          ? {
+              upstream: {
+                kind: "codex-app-server" as const,
+                ref: {
+                  connectionFingerprint: upstreamBaseline.connectionFingerprint,
+                  threadId: request.threadId,
+                },
+                marker: {
+                  turnId: upstreamBaseline.turnId,
+                  userMessageCount: upstreamBaseline.userMessageCount,
+                },
+              },
+            }
+          : {}),
+      };
     },
+    checkUpstreamActivity: upstream.createChecker(params),
     archive: async (request) => {
       const runnerConfirmation: unknown = request.confirmNoOtherRunner;
       if (runnerConfirmation !== true) {

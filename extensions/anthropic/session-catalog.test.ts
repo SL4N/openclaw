@@ -201,9 +201,18 @@ describe("Claude session catalog", () => {
 
     await expect(
       provider?.continueSession?.({ hostId: "gateway:local", threadId: sessionId }),
-    ).resolves.toEqual({
-      sessionKey: expect.stringContaining("plugin:anthropic:catalog-adopt:claude:"),
-    });
+    ).resolves.toEqual(
+      expect.objectContaining({
+        sessionKey: expect.stringContaining("plugin:anthropic:catalog-adopt:claude:"),
+        upstream: {
+          kind: "claude-cli",
+          ref: {
+            filePath: expect.stringContaining(`${sessionId}.jsonl`),
+          },
+          marker: { offset: expect.any(Number) },
+        },
+      }),
+    );
     expect(createSessionEntry).toHaveBeenCalledWith(
       expect.objectContaining({
         spawnedCwd: "/work/source",
@@ -447,9 +456,12 @@ describe("Claude session catalog", () => {
     ]);
     await expect(
       provider?.continueSession?.({ hostId: "gateway:local", threadId: sessionId }),
-    ).resolves.toEqual({
-      sessionKey: expect.stringContaining("plugin:anthropic:catalog-adopt:claude:"),
-    });
+    ).resolves.toEqual(
+      expect.objectContaining({
+        sessionKey: expect.stringContaining("plugin:anthropic:catalog-adopt:claude:"),
+        upstream: expect.objectContaining({ kind: "claude-cli" }),
+      }),
+    );
     expect(createSessionEntry).toHaveBeenCalledWith(
       expect.objectContaining({
         initialEntry: expect.objectContaining({
@@ -537,6 +549,11 @@ describe("Claude session catalog", () => {
     await expect(provider?.continueSession?.({ hostId: "node:node-a", threadId })).resolves.toEqual(
       {
         sessionKey: expect.stringContaining("plugin:anthropic:catalog-adopt:claude:"),
+        upstream: {
+          kind: "claude-cli",
+          ref: { nodeId: "node-a", threadId },
+          marker: { uuid: "history-1" },
+        },
       },
     );
     expect(createSessionEntry).toHaveBeenCalledWith(

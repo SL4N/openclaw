@@ -207,12 +207,12 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
     // Its case-insensitive scope-key resolver adds one function, also mirrored by compat.
     publicExports: readPluginSdkSurfaceBudgetEnv(
       "OPENCLAW_PLUGIN_SDK_MAX_PUBLIC_EXPORTS",
-      10665,
+      10673,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
       "OPENCLAW_PLUGIN_SDK_MAX_PUBLIC_FUNCTION_EXPORTS",
-      5371,
+      5373,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(

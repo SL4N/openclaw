@@ -20,6 +20,7 @@ import {
   createCodexSessionCatalogControl,
   createCodexSessionCatalogNodeHostCommands,
 } from "./session-catalog.js";
+import { classifyCodexUpstreamTurns } from "./session-upstream-activity.js";
 
 const CODEX_APP_SERVER_THREADS_LIST_COMMAND = "codex.appServer.threads.list.v1";
 const CODEX_APP_SERVER_THREAD_TURNS_LIST_COMMAND = "codex.appServer.thread.turns.list.v1";
@@ -1331,6 +1332,11 @@ describe("Codex supervision actions", () => {
     const { api } = createGatewayApi(runtime);
     const bindingStore = createCodexTestBindingStore();
     const control = createEligibleControl({ readThread: vi.fn(async () => sourceThread) });
+    const baselines: Array<{
+      connectionFingerprint: string;
+      turnId: string | null;
+      userMessageCount: number;
+    }> = [];
 
     const first = await continueLocalCodexSession({
       api,
@@ -1338,6 +1344,7 @@ describe("Codex supervision actions", () => {
       config,
       control,
       threadId: "thread-1",
+      onContinued: (baseline) => baselines.push(baseline),
     });
     const second = await continueLocalCodexSession({
       api,
@@ -1345,6 +1352,7 @@ describe("Codex supervision actions", () => {
       config,
       control,
       threadId: "thread-1",
+      onContinued: (baseline) => baselines.push(baseline),
     });
 
     expect(first).toEqual({
@@ -1352,6 +1360,20 @@ describe("Codex supervision actions", () => {
       disposition: "forked",
     });
     expect(second).toEqual({ sessionKey: first.sessionKey, disposition: "existing" });
+    expect(baselines).toEqual([
+      {
+        connectionFingerprint: "catalog-connection",
+        // Marker baseline includes the active turn; history import below still
+        // stops at the last terminal turn.
+        turnId: "turn-active",
+        userMessageCount: 0,
+      },
+      {
+        connectionFingerprint: "catalog-connection",
+        turnId: "turn-active",
+        userMessageCount: 0,
+      },
+    ]);
     expect(control.withPinnedConnection).toHaveBeenCalledTimes(2);
     expect(createSessionEntry).toHaveBeenCalledOnce();
     expect(createSessionEntry).toHaveBeenCalledWith(
@@ -1411,8 +1433,89 @@ describe("Codex supervision actions", () => {
     });
     expect(control.readThread).toHaveBeenCalledTimes(2);
     expect(control.readThread).toHaveBeenNthCalledWith(1, "thread-1", true);
-    expect(control.readThread).toHaveBeenNthCalledWith(2, "thread-1", false);
+    expect(control.readThread).toHaveBeenNthCalledWith(2, "thread-1", true);
     expect(commandRpcMocks.codexControlRequest).not.toHaveBeenCalled();
+  });
+
+  it("baselines a re-continued adoption from its bound canonical thread", async () => {
+    const sessionKey = supervisionSessionKey("thread-1");
+    const sessionId = "openclaw-session-existing";
+    const canonicalTurn = {
+      id: "turn-canonical",
+      status: "completed",
+      startedAt: 200,
+      items: [
+        { id: "user-1", type: "userMessage", text: "first" },
+        { id: "user-2", type: "userMessage", text: "second" },
+      ],
+    } as NonNullable<CodexThread["turns"]>[number];
+    const canonicalThread = idleThread({
+      id: "thread-1-branch",
+      turns: [canonicalTurn],
+    });
+    const { runtime } = createRuntime({
+      entries: [
+        {
+          sessionKey,
+          entry: adoptedEntry({ sourceThreadId: "thread-1", sessionId }),
+        },
+      ],
+    });
+    const { api } = createGatewayApi(runtime);
+    const bindingStore = createCodexTestBindingStore();
+    await seedSupervisionBinding({
+      bindingStore,
+      sessionId,
+      sessionKey,
+      sourceThreadId: "thread-1",
+    });
+    const control = createEligibleControl({
+      readThread: vi.fn(async (threadId: string) =>
+        threadId === canonicalThread.id ? canonicalThread : idleThread({ id: threadId }),
+      ),
+    });
+    const baselines: Array<{
+      connectionFingerprint: string;
+      turnId: string | null;
+      userMessageCount: number;
+    }> = [];
+
+    await continueLocalCodexSession({
+      api,
+      bindingStore,
+      config,
+      control,
+      threadId: "thread-1",
+      onContinued: (baseline) => baselines.push(baseline),
+    });
+
+    expect(control.readThread).toHaveBeenCalledWith("thread-1-branch", true);
+    expect(baselines).toEqual([
+      {
+        connectionFingerprint: "catalog-connection",
+        turnId: "turn-canonical",
+        userMessageCount: 2,
+      },
+    ]);
+    const baseline = baselines[0];
+    if (!baseline) {
+      throw new Error("expected canonical upstream baseline");
+    }
+    expect(
+      classifyCodexUpstreamTurns({
+        probe: {
+          sessionKey,
+          agentId: "main",
+          threadId: "thread-1",
+          hostId: CODEX_LOCAL_SESSION_HOST_ID,
+          upstreamKind: "codex-app-server",
+          upstreamRef: { connectionFingerprint: "catalog-connection" },
+          marker: baseline,
+          ownRecentUserTexts: [],
+        },
+        turns: [canonicalTurn],
+      }),
+    ).toBeUndefined();
   });
 
   it("keeps adopted sessions discoverable when the configured default agent changes", async () => {
@@ -1916,12 +2019,15 @@ describe("Codex supervision actions", () => {
     expect(createSessionEntry).not.toHaveBeenCalled();
   });
 
-  it("opens a mapped active source without applying the unadopted idle gate", async () => {
+  it("opens a mapped active bound thread without applying the unadopted idle gate", async () => {
     const { runtime, entries, createSessionEntry, patchSessionEntry } = createRuntime();
     const { api } = createGatewayApi(runtime);
     const control = createEligibleControl({
       readThread: vi.fn(async () =>
-        idleThread({ status: { type: "active", activeFlags: ["waitingOnApproval"] } }),
+        idleThread({
+          id: "thread-1-branch",
+          status: { type: "active", activeFlags: ["waitingOnApproval"] },
+        }),
       ),
     });
     const sessionKey = supervisionSessionKey("thread-1");
@@ -1950,13 +2056,13 @@ describe("Codex supervision actions", () => {
       sessionKey,
       disposition: "existing",
     });
-    expect(control.readThread).toHaveBeenCalledWith("thread-1", false);
+    expect(control.readThread).toHaveBeenCalledWith("thread-1-branch", true);
     expect(patchSessionEntry).toHaveBeenCalledOnce();
     expect(createSessionEntry).not.toHaveBeenCalled();
   });
 
   it.each([
-    { name: "mapped", mapped: true, includeTurns: false },
+    { name: "mapped", mapped: true, includeTurns: true },
     { name: "unmapped", mapped: false, includeTurns: true },
   ])(
     "rejects a $name Continue when the fresh read returns a different thread",
@@ -1992,7 +2098,10 @@ describe("Codex supervision actions", () => {
         }),
       ).rejects.toThrow("returned a different thread than requested");
 
-      expect(control.readThread).toHaveBeenCalledWith("thread-1", includeTurns);
+      expect(control.readThread).toHaveBeenCalledWith(
+        mapped ? "thread-1-branch" : "thread-1",
+        includeTurns,
+      );
       expect(createSessionEntry).not.toHaveBeenCalled();
       expect(patchSessionEntry).not.toHaveBeenCalled();
       expect(transcriptMirrorMocks.importCodexThreadHistoryToTranscript).not.toHaveBeenCalled();
@@ -2025,7 +2134,7 @@ describe("Codex supervision actions", () => {
           throw new Error("missing mapped session");
         }
         entry.sessionId = "openclaw-session-replacement";
-        return idleThread();
+        return idleThread({ id: "thread-1-branch" });
       }),
     });
 
