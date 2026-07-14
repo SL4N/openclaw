@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   mcpDescriptors: [] as Array<Record<string, unknown>>,
   nodeSkillDescriptors: [] as Array<Record<string, unknown>>,
   runtimeSteps: [] as string[],
+  useFakeRuntime: false,
   normalizedPath: null as string | null,
   resolvedExecutables: new Map<string, string>(),
   closeMcpManager: vi.fn(async () => undefined),
@@ -44,6 +45,13 @@ const mocks = vi.hoisted(() => ({
     aborted: false,
     elapsedMs: 0,
   })),
+  activeRuntime: {
+    invoke: vi.fn(async () => {}),
+    handleInput: vi.fn(),
+    cancel: vi.fn(),
+    cancelAll: vi.fn(),
+    close: vi.fn(async () => {}),
+  },
 }));
 
 vi.mock("../config/config.js", () => ({
@@ -134,6 +142,25 @@ vi.mock("./skills.js", () => ({
   scanNodeHostedSkills: vi.fn(() => mocks.nodeSkillDescriptors),
 }));
 
+vi.mock("./runtime.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./runtime.js")>();
+  return {
+    ...actual,
+    prepareNodeHostRuntime: async (
+      ...args: Parameters<typeof actual.prepareNodeHostRuntime>
+    ): ReturnType<typeof actual.prepareNodeHostRuntime> => {
+      if (!mocks.useFakeRuntime) {
+        return await actual.prepareNodeHostRuntime(...args);
+      }
+      return {
+        manifest: { caps: [], commands: [], pathEnv: process.env.PATH ?? "" },
+        initialInventory: { skills: [], pluginTools: [] },
+        start: () => mocks.activeRuntime,
+      };
+    },
+  };
+});
+
 function lastCapturedOptions(): GatewayClientOptions | undefined {
   const list = mocks.capturedGatewayClientOptions;
   return list[list.length - 1];
@@ -147,6 +174,7 @@ describe("runNodeHost", () => {
     mocks.mcpDescriptors = [];
     mocks.nodeSkillDescriptors = [];
     mocks.runtimeSteps = [];
+    mocks.useFakeRuntime = false;
     mocks.normalizedPath = null;
     mocks.resolvedExecutables.clear();
     vi.clearAllMocks();
@@ -164,6 +192,28 @@ describe("runNodeHost", () => {
     expect(resolveNodeHostGatewayDeviceFamily("win32")).toBe("Windows");
     expect(resolveNodeHostGatewayDeviceFamily("linux")).toBe("Linux");
     expect(resolveNodeHostGatewayDeviceFamily("freebsd")).toBeUndefined();
+  });
+
+  it("routes invoke input, cancellation, and connection close to the runtime", async () => {
+    mocks.useFakeRuntime = true;
+    await expect(runNodeHost({ gatewayHost: "127.0.0.1", gatewayPort: 18789 })).rejects.toThrow(
+      "event loop readiness timeout",
+    );
+    const options = lastCapturedOptions();
+
+    options?.onEvent?.({
+      event: "node.invoke.input",
+      payload: { id: "invoke-1", nodeId: "node-1", seq: 3, payloadJSON: '{"kind":"data"}' },
+    });
+    options?.onEvent?.({
+      event: "node.invoke.cancel",
+      payload: { invokeId: "invoke-1", nodeId: "node-1" },
+    });
+    options?.onClose?.(1000, "connection closed");
+
+    expect(mocks.activeRuntime.handleInput).toHaveBeenCalledWith("invoke-1", 3, '{"kind":"data"}');
+    expect(mocks.activeRuntime.cancel).toHaveBeenCalledWith("invoke-1");
+    expect(mocks.activeRuntime.cancelAll).toHaveBeenCalledOnce();
   });
 
   it("passes the resolved Gateway URL to the Gateway client", async () => {
