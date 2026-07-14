@@ -5,6 +5,7 @@ import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../plug
 import {
   invokeRegisteredNodeHostCommand,
   listRegisteredNodeHostCapsAndCommands,
+  resolvePluginNodeHostCommandError,
 } from "./plugin-node-host.js";
 
 const availabilityContext = { config: {}, env: {} };
@@ -183,5 +184,16 @@ describe("plugin node-host registry", () => {
     );
     await expect(invokeRegisteredNodeHostCommand("missing.command", null)).resolves.toBeNull();
     expect(handle).toHaveBeenCalledWith('{"ok":true}');
+  });
+
+  it("preserves explicit command error codes and contains unknown failures", () => {
+    expect(resolvePluginNodeHostCommandError(new Error("CAMERA_UNAVAILABLE: no camera"))).toEqual({
+      code: "CAMERA_UNAVAILABLE",
+      message: "CAMERA_UNAVAILABLE: no camera",
+    });
+    expect(resolvePluginNodeHostCommandError(new Error("boom"))).toEqual({
+      code: "INVALID_REQUEST",
+      message: "Error: boom",
+    });
   });
 });

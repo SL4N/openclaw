@@ -123,3 +123,16 @@ export async function invokeRegisteredNodeHostCommand(
   }
   return await match.command.handle(paramsJSON);
 }
+
+/** Preserve explicit plugin command error codes while defaulting unknown failures safely. */
+export function resolvePluginNodeHostCommandError(err: unknown): {
+  code: string;
+  message: string;
+} {
+  const message = err instanceof Error ? err.message : String(err);
+  const match = /^([A-Z][A-Z0-9_]{0,63}):(?:\s|$)/u.exec(message);
+  return {
+    code: match?.[1] ?? "INVALID_REQUEST",
+    message: match ? message : String(err),
+  };
+}
