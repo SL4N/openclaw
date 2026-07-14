@@ -941,6 +941,7 @@ export const KNIP_UNUSED_EXPORT_BASELINE = [
   "src/sessions/session-lifecycle-admission.ts: runExclusiveSessionLifecycle",
   "src/sessions/session-state-events.ts: pruneSessionStateEvents",
   "src/sessions/session-state-events.ts: sessionStateEventStoreLimits",
+  "src/sessions/session-state-notices.ts: SESSION_STATE_CONTEXT_PREFIX",
   "src/sessions/session-upstream-links.ts: SessionUpstreamLink",
   "src/sessions/session-upstream-monitor.ts: runSessionUpstreamMonitorTick",
   "src/sessions/session-upstream-monitor.ts: SessionUpstreamMonitor",
