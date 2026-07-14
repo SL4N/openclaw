@@ -34,6 +34,7 @@ import {
   renderSettingsValue,
 } from "../../components/settings-ui.ts";
 import { t } from "../../i18n/index.ts";
+import type { ConfigAutoSaveStatus } from "../../lib/config/index.ts";
 import type { RealtimeTalkInputDevice } from "../chat/realtime-talk-input.ts";
 import {
   APPEARANCE_SETTINGS_TARGET_IDS,
@@ -117,7 +118,8 @@ export type ConfigProps = {
   loading: boolean;
   saving: boolean;
   applying: boolean;
-  updating: boolean;
+  autoSaveStatus: ConfigAutoSaveStatus;
+  needsApply: boolean;
   connected: boolean;
   schema: unknown;
   schemaLoading: boolean;
@@ -138,11 +140,9 @@ export type ConfigProps = {
   onSearchChange: (query: string) => void;
   onSectionChange: (section: string | null) => void;
   onSubsectionChange: (section: string | null) => void;
-  onReload: () => void;
-  onReset: () => void;
   onSave: () => void;
   onApply: () => void;
-  onUpdate: () => void;
+  onRawDiscard: () => void;
   onOpenFile?: () => void;
   version: string;
   theme: ThemeName;
@@ -766,17 +766,6 @@ function truncateValue(value: unknown, maxLen = 40): string {
   return truncateUtf16Safe(str, maxLen - 3) + "...";
 }
 
-function renderDiffValue(path: ConfigDiffPath, value: unknown, _uiHints: ConfigUiHints): string {
-  if (
-    isSensitiveConfigPath(formatConfigDiffPath(path)) &&
-    value != null &&
-    truncateValue(value).trim() !== ""
-  ) {
-    return REDACTED_PLACEHOLDER;
-  }
-  return truncateValue(value);
-}
-
 function hintKeyMatchesPathPrefix(hintKey: string, path: ConfigDiffPath): boolean {
   const hintSegments = hintKey.split(".");
   if (hintSegments.length !== path.length) {
@@ -1349,6 +1338,64 @@ function renderAppearanceSection(props: ConfigProps) {
   `;
 }
 
+const renderBusyButtonContent = (busy: boolean, label: string, busyLabel: string) =>
+  busy
+    ? html`<span class="config-action-spinner" aria-hidden="true">${icons.loader}</span
+        >${busyLabel}`
+    : label;
+
+type ConfigApplyBannerProps = {
+  needsApply: boolean;
+  applying: boolean;
+  connected: boolean;
+  onApply: () => void;
+  /** Adds config-layout side margins; the quick-settings column omits them. */
+  inset?: boolean;
+};
+
+/** Slim restart affordance shown after config.set until config.apply runs. */
+export function renderConfigApplyBanner(props: ConfigApplyBannerProps) {
+  if (!props.needsApply) {
+    return nothing;
+  }
+  return html`
+    <div
+      class="config-apply-banner ${props.inset ? "config-apply-banner--inset" : ""}"
+      role="status"
+    >
+      <span class="config-apply-banner__text">${t("configView.applyBannerText")}</span>
+      <button
+        class="btn btn--sm"
+        ?disabled=${props.applying || !props.connected}
+        aria-busy=${props.applying ? "true" : "false"}
+        @click=${props.onApply}
+      >
+        ${renderBusyButtonContent(
+          props.applying,
+          t("configView.applyBannerAction"),
+          t("configView.applying"),
+        )}
+      </button>
+    </div>
+  `;
+}
+
+function renderAutoSaveStatus(props: Pick<ConfigProps, "autoSaveStatus" | "onSave">) {
+  switch (props.autoSaveStatus) {
+    case "saving":
+      return renderSettingsStatus({ kind: "accent", label: t("configView.autoSaveSaving") });
+    case "saved":
+      return renderSettingsStatus({ kind: "ok", label: t("configView.autoSaveSaved") });
+    case "error":
+      return html`
+        ${renderSettingsStatus({ kind: "danger", label: t("configView.autoSaveFailed") })}
+        <button class="btn btn--sm" @click=${props.onSave}>${t("configView.retry")}</button>
+      `;
+    default:
+      return nothing;
+  }
+}
+
 function resetConfigEphemeralState(viewState: ConfigViewState) {
   viewState.rawRevealed = false;
   viewState.rawDiffOpen = false;
@@ -1565,8 +1612,7 @@ export function renderConfig(props: ConfigProps) {
     `;
   }
 
-  // Compute diff for showing changes (works for both form and raw modes)
-  const diff = formMode === "form" ? computeDiff(props.originalValue, props.formValue) : [];
+  // Raw mode keeps an explicit diff + save flow; form edits auto-save.
   const hasRawChanges = formMode === "raw" && props.raw !== props.originalRaw;
   if ((!hasRawChanges || formMode !== "raw") && viewState.rawDiffOpen) {
     viewState.rawDiffOpen = false;
@@ -1578,22 +1624,9 @@ export function renderConfig(props: ConfigProps) {
     formMode === "raw" && hasRawChanges && viewState.rawDiffOpen
       ? computeRawDiff(viewState, props.originalRaw, props.raw)
       : [];
-  const hasChanges = formMode === "form" ? diff.length > 0 : hasRawChanges;
-  const configBusy = props.loading || props.saving || props.applying || props.updating;
-
-  // Save/apply buttons require actual changes to be enabled.
-  // Note: formUnsafe warns about unsupported schema paths but shouldn't block saving.
-  const canSaveForm = Boolean(props.formValue) && !props.loading && Boolean(analysis.schema);
-  const canSave =
-    props.connected && !configBusy && hasChanges && (formMode === "raw" ? true : canSaveForm);
-  const canApply =
-    props.connected && !configBusy && hasChanges && (formMode === "raw" ? true : canSaveForm);
-  const canUpdate = props.connected && !configBusy;
-  const renderActionButtonContent = (busy: boolean, label: string, busyLabel: string) =>
-    busy
-      ? html`<span class="config-action-spinner" aria-hidden="true">${icons.loader}</span
-          >${busyLabel}`
-      : label;
+  const configBusy = props.loading || props.saving || props.applying;
+  const canRawSave = props.connected && !configBusy && hasRawChanges;
+  const autoSaveStatus = renderAutoSaveStatus(props);
 
   const showAppearanceOnRoot =
     includeVirtualSections &&
@@ -1604,109 +1637,39 @@ export function renderConfig(props: ConfigProps) {
   return html`
     <div class="config-layout">
       <main class="config-main">
-        <div class="config-actions">
-          <div class="config-actions__left">
-            ${showModeToggle
-              ? html`
-                  <div class="config-mode-toggle">
-                    <button
-                      class="config-mode-toggle__btn ${formMode === "form" ? "active" : ""}"
-                      ?disabled=${props.schemaLoading || !props.schema}
-                      title=${formUnsafe ? t("configView.formUnsafeTitle") : ""}
-                      @click=${() => props.onFormModeChange("form")}
-                    >
-                      ${t("configView.form")}
-                    </button>
-                    <button
-                      class="config-mode-toggle__btn ${formMode === "raw" ? "active" : ""}"
-                      ?disabled=${!rawAvailable}
-                      title=${rawAvailable
-                        ? t("configView.rawTitle")
-                        : t("configView.rawUnavailableTitle")}
-                      @click=${() => props.onFormModeChange("raw")}
-                    >
-                      ${t("configView.raw")}
-                    </button>
-                  </div>
-                `
-              : nothing}
-            ${hasChanges
-              ? html`
-                  <span class="config-changes-badge"
-                    >${formMode === "raw"
-                      ? t("common.unsavedChanges")
-                      : t(
-                          diff.length === 1
-                            ? "configView.unsavedChange"
-                            : "configView.unsavedChanges",
-                          { count: String(diff.length) },
-                        )}</span
-                  >
-                `
-              : html` <span class="config-status muted">${t("configView.noChanges")}</span> `}
-          </div>
-          <div class="config-actions__right">
-            ${!rawAvailable
-              ? html`
-                  <span class="config-status muted config-actions__notice"
-                    >${t("configView.rawDisabled")}</span
-                  >
-                `
-              : nothing}
-            <div class="config-actions__buttons">
-              ${props.onOpenFile
-                ? html`
-                    <button class="btn btn--sm" @click=${props.onOpenFile}>
-                      ${icons.fileText} ${t("configView.open")}
-                    </button>
-                  `
-                : nothing}
-              <button class="btn btn--sm" ?disabled=${configBusy} @click=${props.onReload}>
-                ${props.loading ? t("common.loading") : t("common.reload")}
-              </button>
-              <button
-                class="btn btn--sm"
-                ?disabled=${configBusy || !hasChanges}
-                @click=${props.onReset}
-              >
-                ${t("configView.clear")}
-              </button>
-              <button
-                class="btn btn--sm primary"
-                ?disabled=${!canSave}
-                aria-busy=${props.saving ? "true" : "false"}
-                @click=${props.onSave}
-              >
-                ${renderActionButtonContent(props.saving, t("common.save"), t("common.saving"))}
-              </button>
-              <button
-                class="btn btn--sm"
-                ?disabled=${!canApply}
-                aria-busy=${props.applying ? "true" : "false"}
-                @click=${props.onApply}
-              >
-                ${renderActionButtonContent(
-                  props.applying,
-                  t("configView.apply"),
-                  t("configView.applying"),
-                )}
-              </button>
-              <button
-                class="btn btn--sm"
-                ?disabled=${!canUpdate}
-                aria-busy=${props.updating ? "true" : "false"}
-                @click=${props.onUpdate}
-              >
-                ${renderActionButtonContent(
-                  props.updating,
-                  t("configView.update"),
-                  t("configView.updating"),
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-
+        ${showModeToggle || autoSaveStatus !== nothing
+          ? html`
+              <div class="config-toolbar">
+                ${showModeToggle
+                  ? html`
+                      <div class="config-mode-toggle">
+                        <button
+                          class="config-mode-toggle__btn ${formMode === "form" ? "active" : ""}"
+                          ?disabled=${props.schemaLoading || !props.schema}
+                          title=${formUnsafe ? t("configView.formUnsafeTitle") : ""}
+                          @click=${() => props.onFormModeChange("form")}
+                        >
+                          ${t("configView.form")}
+                        </button>
+                        <button
+                          class="config-mode-toggle__btn ${formMode === "raw" ? "active" : ""}"
+                          ?disabled=${!rawAvailable}
+                          title=${rawAvailable
+                            ? t("configView.rawTitle")
+                            : t("configView.rawUnavailableTitle")}
+                          @click=${() => props.onFormModeChange("raw")}
+                        >
+                          ${t("configView.raw")}
+                        </button>
+                      </div>
+                    `
+                  : nothing}
+                <div class="config-toolbar__status" role="status" aria-live="polite">
+                  ${autoSaveStatus}
+                </div>
+              </div>
+            `
+          : nothing}
         ${settingsLayout === "accordion"
           ? renderAccordionNav()
           : html`
@@ -1779,6 +1742,13 @@ export function renderConfig(props: ConfigProps) {
                 </wa-tab-group>
               </div>
             `}
+        ${renderConfigApplyBanner({
+          needsApply: props.needsApply,
+          applying: props.applying,
+          connected: props.connected,
+          onApply: props.onApply,
+          inset: true,
+        })}
         ${validity === "invalid" && !viewState.validityDismissed
           ? html`
               <div class="config-validity-warning">
@@ -1813,50 +1783,7 @@ export function renderConfig(props: ConfigProps) {
             `
           : nothing}
 
-        <!-- Diff panel -->
-        ${hasChanges && formMode === "form"
-          ? html`
-              <details class="config-diff">
-                <summary class="config-diff__summary">
-                  <span
-                    >${t(
-                      diff.length === 1
-                        ? "configView.viewPendingChange"
-                        : "configView.viewPendingChanges",
-                      { count: String(diff.length) },
-                    )}</span
-                  >
-                  <svg
-                    class="config-diff__chevron"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                  >
-                    <polyline points="6 9 12 15 18 9"></polyline>
-                  </svg>
-                </summary>
-                <div class="config-diff__content">
-                  ${diff.map(
-                    (change) => html`
-                      <div class="config-diff__item">
-                        <div class="config-diff__path">${formatConfigDiffPath(change.path)}</div>
-                        <div class="config-diff__values">
-                          <span class="config-diff__from"
-                            >${renderDiffValue(change.path, change.from, props.uiHints)}</span
-                          >
-                          <span class="config-diff__arrow">→</span>
-                          <span class="config-diff__to"
-                            >${renderDiffValue(change.path, change.to, props.uiHints)}</span
-                          >
-                        </div>
-                      </div>
-                    `,
-                  )}
-                </div>
-              </details>
-            `
-          : nothing}
+        <!-- Raw diff panel -->
         ${hasRawChanges && formMode === "raw"
           ? html`
               <details
@@ -2004,6 +1931,35 @@ export function renderConfig(props: ConfigProps) {
                             </div>
                           `
                         : nothing}
+                      <!-- Raw mode owns file-level operations: open, discard, save. -->
+                      <div class="config-raw-actions">
+                        ${props.onOpenFile
+                          ? html`
+                              <button class="btn btn--sm" @click=${props.onOpenFile}>
+                                ${icons.fileText} ${t("configView.open")}
+                              </button>
+                            `
+                          : nothing}
+                        <button
+                          class="btn btn--sm"
+                          ?disabled=${configBusy || !hasRawChanges}
+                          @click=${props.onRawDiscard}
+                        >
+                          ${t("configView.rawDiscard")}
+                        </button>
+                        <button
+                          class="btn btn--sm primary"
+                          ?disabled=${!canRawSave}
+                          aria-busy=${props.saving ? "true" : "false"}
+                          @click=${props.onSave}
+                        >
+                          ${renderBusyButtonContent(
+                            props.saving,
+                            t("common.save"),
+                            t("common.saving"),
+                          )}
+                        </button>
+                      </div>
                       <div class="field config-raw-field">
                         <span style="display:flex;align-items:center;gap:8px;">
                           ${t("configView.rawConfig")}

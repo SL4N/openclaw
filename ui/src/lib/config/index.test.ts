@@ -2,7 +2,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ConfigSchemaResponse, ConfigSnapshot } from "../../api/types.ts";
-import { createRuntimeConfigCapability, findAgentConfigEntryIndex } from "./index.ts";
+import {
+  CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS,
+  createRuntimeConfigCapability,
+  findAgentConfigEntryIndex,
+} from "./index.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -38,7 +42,35 @@ function createGatewayHarness(client: GatewayBrowserClient) {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
+
+/** Simple hash-tracking config.get/config.set/config.apply mock gateway. */
+function createConfigServerMock() {
+  let hashCounter = 1;
+  let storedRaw = '{\n  "count": 1\n}\n';
+  const submissions: Array<{ method: string; raw: string; baseHash: string }> = [];
+  const request = vi.fn(async (method: string, params?: unknown) => {
+    if (method === "config.get") {
+      return {
+        config: JSON.parse(storedRaw) as Record<string, unknown>,
+        raw: storedRaw,
+        hash: `hash-${hashCounter}`,
+        valid: true,
+        issues: [],
+      };
+    }
+    if (method === "config.set" || method === "config.apply") {
+      const { raw, baseHash } = params as { raw: string; baseHash: string };
+      submissions.push({ method, raw, baseHash });
+      storedRaw = raw;
+      hashCounter += 1;
+      return {};
+    }
+    return {};
+  });
+  return { request, submissions, currentHash: () => `hash-${hashCounter}` };
+}
 
 describe("createRuntimeConfigCapability", () => {
   it("preserves a dirty draft and its original base hash across refreshes", async () => {
@@ -260,6 +292,201 @@ describe("createRuntimeConfigCapability", () => {
     expect(runtimeConfig.state.configSchemaVersion).toBe("current");
     expect(runtimeConfig.state.configLoading).toBe(false);
     expect(runtimeConfig.state.configSchemaLoading).toBe(false);
+    runtimeConfig.dispose();
+  });
+});
+
+describe("config form auto-save", () => {
+  function createHarness(request: GatewayBrowserClient["request"]) {
+    const client = { request } as unknown as GatewayBrowserClient;
+    const { gateway, publish } = createGatewayHarness(client);
+    return { runtimeConfig: createRuntimeConfigCapability(gateway), publish };
+  }
+
+  it("debounces form edits into one config.set and marks needsApply", async () => {
+    vi.useFakeTimers();
+    const server = createConfigServerMock();
+    const { runtimeConfig } = createHarness(server.request as GatewayBrowserClient["request"]);
+    await runtimeConfig.ensureLoaded();
+
+    runtimeConfig.patchForm(["count"], 2);
+    runtimeConfig.patchForm(["count"], 3);
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS - 1);
+    expect(server.submissions).toHaveLength(0);
+    expect(runtimeConfig.state.configFormDirty).toBe(true);
+    expect(runtimeConfig.state.configAutoSaveStatus).toBe("idle");
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(server.submissions).toEqual([
+      { method: "config.set", raw: '{\n  "count": 3\n}\n', baseHash: "hash-1" },
+    ]);
+    expect(runtimeConfig.state.configFormDirty).toBe(false);
+    expect(runtimeConfig.state.configAutoSaveStatus).toBe("saved");
+    expect(runtimeConfig.state.configNeedsApply).toBe(true);
+    // The post-save reload rebased the clean draft onto the new hash.
+    expect(runtimeConfig.state.configSnapshot?.hash).toBe("hash-2");
+    runtimeConfig.dispose();
+  });
+
+  it("keeps mid-flight edits dirty and queues exactly one trailing save", async () => {
+    vi.useFakeTimers();
+    const firstSet = deferred<unknown>();
+    let hashCounter = 1;
+    let storedRaw = '{\n  "count": 1\n}\n';
+    const submissions: Array<{ raw: string; baseHash: string }> = [];
+    const request = vi.fn((method: string, params?: unknown) => {
+      if (method === "config.get") {
+        return Promise.resolve({
+          config: JSON.parse(storedRaw) as Record<string, unknown>,
+          raw: storedRaw,
+          hash: `hash-${hashCounter}`,
+          valid: true,
+          issues: [],
+        });
+      }
+      if (method === "config.set") {
+        const { raw, baseHash } = params as { raw: string; baseHash: string };
+        submissions.push({ raw, baseHash });
+        storedRaw = raw;
+        hashCounter += 1;
+        return submissions.length === 1 ? firstSet.promise : Promise.resolve({});
+      }
+      return Promise.resolve({});
+    });
+    const { runtimeConfig } = createHarness(request as GatewayBrowserClient["request"]);
+    await runtimeConfig.ensureLoaded();
+
+    runtimeConfig.patchForm(["count"], 2);
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS);
+    expect(submissions).toHaveLength(1);
+    expect(runtimeConfig.state.configAutoSaveStatus).toBe("saving");
+
+    // Edits during the in-flight save stay dirty and fold into one trailing save.
+    runtimeConfig.patchForm(["count"], 3);
+    runtimeConfig.patchForm(["count"], 4);
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS);
+    expect(submissions).toHaveLength(1);
+    expect(runtimeConfig.state.configFormDirty).toBe(true);
+
+    firstSet.resolve({});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(submissions).toHaveLength(2);
+    expect(submissions[1]).toEqual({ raw: '{\n  "count": 4\n}\n', baseHash: "hash-2" });
+    expect(runtimeConfig.state.configFormDirty).toBe(false);
+    expect(runtimeConfig.state.configAutoSaveStatus).toBe("saved");
+    runtimeConfig.dispose();
+  });
+
+  it("surfaces auto-save failures without retry-looping", async () => {
+    vi.useFakeTimers();
+    let setCalls = 0;
+    const request = vi.fn(async (method: string) => {
+      if (method === "config.get") {
+        return {
+          config: { count: 1 },
+          raw: '{\n  "count": 1\n}\n',
+          hash: "hash-1",
+          valid: true,
+          issues: [],
+        };
+      }
+      if (method === "config.set") {
+        setCalls += 1;
+        throw new Error("disk full");
+      }
+      return {};
+    });
+    const { runtimeConfig } = createHarness(request as GatewayBrowserClient["request"]);
+    await runtimeConfig.ensureLoaded();
+
+    runtimeConfig.patchForm(["count"], 2);
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS);
+    expect(setCalls).toBe(1);
+    expect(runtimeConfig.state.configAutoSaveStatus).toBe("error");
+    expect(runtimeConfig.state.configFormDirty).toBe(true);
+    expect(runtimeConfig.state.configNeedsApply).toBe(false);
+    expect(runtimeConfig.state.lastError).toContain("disk full");
+
+    // No retry loop; only the next edit reschedules a save.
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS * 10);
+    expect(setCalls).toBe(1);
+    runtimeConfig.patchForm(["count"], 3);
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS);
+    expect(setCalls).toBe(2);
+    runtimeConfig.dispose();
+  });
+
+  it("clears needsApply on apply and on a discarding refresh", async () => {
+    vi.useFakeTimers();
+    const server = createConfigServerMock();
+    const { runtimeConfig } = createHarness(server.request as GatewayBrowserClient["request"]);
+    await runtimeConfig.ensureLoaded();
+
+    runtimeConfig.patchForm(["count"], 2);
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS);
+    expect(runtimeConfig.state.configNeedsApply).toBe(true);
+
+    await expect(runtimeConfig.apply()).resolves.toBe(true);
+    expect(runtimeConfig.state.configNeedsApply).toBe(false);
+    expect(runtimeConfig.state.configAutoSaveStatus).toBe("idle");
+    expect(server.submissions.at(-1)?.method).toBe("config.apply");
+
+    runtimeConfig.patchForm(["count"], 5);
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS);
+    expect(runtimeConfig.state.configNeedsApply).toBe(true);
+    await runtimeConfig.refresh({ discardPendingChanges: true });
+    expect(runtimeConfig.state.configNeedsApply).toBe(false);
+    runtimeConfig.dispose();
+  });
+
+  it("flushes the pending debounce before apply and leaves no dangling save", async () => {
+    vi.useFakeTimers();
+    const server = createConfigServerMock();
+    const { runtimeConfig } = createHarness(server.request as GatewayBrowserClient["request"]);
+    await runtimeConfig.ensureLoaded();
+
+    runtimeConfig.patchForm(["count"], 7);
+    // Apply serializes the current form itself; the scheduled autosave is
+    // cancelled and never fires afterwards.
+    await expect(runtimeConfig.apply()).resolves.toBe(true);
+    expect(server.submissions).toEqual([
+      { method: "config.apply", raw: '{\n  "count": 7\n}\n', baseHash: "hash-1" },
+    ]);
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS * 2);
+    expect(server.submissions).toHaveLength(1);
+    runtimeConfig.dispose();
+  });
+
+  it("drops a scheduled auto-save on dispose", async () => {
+    vi.useFakeTimers();
+    const server = createConfigServerMock();
+    const { runtimeConfig } = createHarness(server.request as GatewayBrowserClient["request"]);
+    await runtimeConfig.ensureLoaded();
+
+    runtimeConfig.patchForm(["count"], 2);
+    runtimeConfig.dispose();
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS * 2);
+    expect(server.submissions).toHaveLength(0);
+  });
+
+  it("never auto-saves raw-text drafts and submits them on manual save", async () => {
+    vi.useFakeTimers();
+    const server = createConfigServerMock();
+    const { runtimeConfig } = createHarness(server.request as GatewayBrowserClient["request"]);
+    await runtimeConfig.ensureLoaded();
+
+    const rawDraft = '{\n  "count": 9,\n  "handEdited": true\n}\n';
+    runtimeConfig.setRaw(rawDraft);
+    await vi.advanceTimersByTimeAsync(CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS * 2);
+    expect(server.submissions).toHaveLength(0);
+    expect(runtimeConfig.state.configFormDirty).toBe(true);
+
+    // Manual save must submit the raw bytes, not the stale form serialization.
+    const savePromise = runtimeConfig.save();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(savePromise).resolves.toBe(true);
+    expect(server.submissions[0]?.raw).toBe(rawDraft);
+    expect(runtimeConfig.state.configNeedsApply).toBe(true);
     runtimeConfig.dispose();
   });
 });

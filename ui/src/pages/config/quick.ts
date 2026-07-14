@@ -45,6 +45,7 @@ import { formatDurationHuman } from "../../lib/format.ts";
 import { normalizeOptionalString } from "../../lib/string-coerce.ts";
 import { renderLanguageSelect } from "./language-select.ts";
 import { GENERAL_SETTINGS_TARGET_IDS } from "./settings-targets.ts";
+import { renderConfigApplyBanner } from "./view.ts";
 
 // ── Types ──
 
@@ -121,15 +122,12 @@ type QuickSettingsProps = {
   userAvatar?: string | null;
   onUserAvatarChange?: (next: string | null) => void;
 
-  // Pending config changes
-  configDirty?: boolean;
+  // Config staging state (quick edits auto-save through the shared draft)
   configLoading?: boolean;
   configSaving?: boolean;
   configApplying?: boolean;
   configUpdating?: boolean;
-  configReady?: boolean;
-  onResetConfig?: () => void;
-  onSaveConfig?: () => void;
+  configNeedsApply?: boolean;
   onApplyConfig?: () => void;
 
   // Connection
@@ -1027,36 +1025,6 @@ function renderPersonalSection(props: QuickSettingsProps) {
   );
 }
 
-function renderPendingChangesBar(props: QuickSettingsProps) {
-  if (props.configDirty !== true) {
-    return nothing;
-  }
-  const configBusy = isConfigBusy(props);
-  const canCommit = props.connected && props.configReady === true && !configBusy;
-
-  return html`
-    <div class="settings-group" aria-live="polite">
-      ${renderSettingsRow({
-        title: t("quickSettings.pending.title"),
-        description: t("quickSettings.pending.hint"),
-        control: html`
-          <button class="btn btn--sm" ?disabled=${configBusy} @click=${props.onResetConfig}>
-            ${t("quickSettings.pending.discard")}
-          </button>
-          <button class="btn btn--sm primary" ?disabled=${!canCommit} @click=${props.onSaveConfig}>
-            ${props.configSaving === true ? t("common.saving") : t("common.save")}
-          </button>
-          <button class="btn btn--sm" ?disabled=${!canCommit} @click=${props.onApplyConfig}>
-            ${props.configApplying === true
-              ? t("quickSettings.pending.applying")
-              : t("quickSettings.pending.applyNow")}
-          </button>
-        `,
-      })}
-    </div>
-  `;
-}
-
 function renderConnectionFooter(props: QuickSettingsProps) {
   const detail = [props.assistantName, props.version ? `v${props.version}` : ""]
     .filter(Boolean)
@@ -1076,9 +1044,15 @@ function renderConnectionFooter(props: QuickSettingsProps) {
 
 export function renderQuickSettings(props: QuickSettingsProps) {
   return renderSettingsPage(html`
+    ${renderConfigApplyBanner({
+      needsApply: props.configNeedsApply === true,
+      applying: props.configApplying === true,
+      connected: props.connected,
+      onApply: () => props.onApplyConfig?.(),
+    })}
     ${renderModelSection(props)} ${renderChannelsSection(props)} ${renderSecuritySection(props)}
     ${renderAutomationsSection(props)} ${renderGeneralSection(props)}
     ${renderAppearanceSection(props)} ${renderPersonalSection(props)} ${renderSystemSection(props)}
-    ${renderPendingChangesBar(props)} ${renderConnectionFooter(props)}
+    ${renderConnectionFooter(props)}
   `);
 }

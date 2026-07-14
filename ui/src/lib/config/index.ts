@@ -11,6 +11,11 @@ import {
   setPathValue,
 } from "../config-form-utils.ts";
 
+export type ConfigAutoSaveStatus = "idle" | "saving" | "saved" | "error";
+
+/** Debounce window between the last form edit and its automatic config.set. */
+export const CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS = 800;
+
 type ConfigState = {
   client: GatewayBrowserClient | null;
   connected: boolean;
@@ -22,6 +27,9 @@ type ConfigState = {
   configIssues: unknown[];
   configSaving: boolean;
   configApplying: boolean;
+  configAutoSaveStatus: ConfigAutoSaveStatus;
+  /** True after a successful config.set until config.apply restarts the gateway. */
+  configNeedsApply: boolean;
   configSnapshot: ConfigSnapshot | null;
   configDraftBaseHash?: string | null;
   configSchema: unknown;
@@ -114,6 +122,8 @@ function createInitialConfigState(snapshot?: Partial<RuntimeConfigGatewaySnapsho
     configIssues: [],
     configSaving: false,
     configApplying: false,
+    configAutoSaveStatus: "idle",
+    configNeedsApply: false,
     configSnapshot: null,
     configDraftBaseHash: null,
     configSchema: null,
@@ -261,6 +271,12 @@ function applyConfigSnapshot(
   options: LoadConfigOptions = {},
 ) {
   const preservePendingChanges = state.configFormDirty && options.discardPendingChanges !== true;
+  if (options.discardPendingChanges === true) {
+    // Discard is a full reset to disk state: pending edits, the restart
+    // banner, and any stale save status all clear together.
+    state.configNeedsApply = false;
+    state.configAutoSaveStatus = "idle";
+  }
   const draftBaseHash = state.configDraftBaseHash ?? state.configSnapshot?.hash ?? null;
   state.configSnapshot = snapshot;
   const editableConfig = resolveEditableSnapshotConfig(snapshot);
@@ -290,6 +306,7 @@ function applyConfigSnapshot(
     state.configFormOriginal = cloneConfigObject(editableConfig ?? {});
     state.configRawOriginal = rawFromSnapshot;
     state.configFormDirty = false;
+    state.configFormMode = "form";
     state.configDraftBaseHash = snapshot.hash ?? null;
     autoAllowlistedPluginIdsByState.delete(state);
   } else {
@@ -500,17 +517,82 @@ async function submitConfigChange(
     state.configFormDirty = false;
     state.configDraftBaseHash = null;
     autoAllowlistedPluginIdsByState.delete(state);
+    if (method === "config.set") {
+      // config.set writes openclaw.json without restarting; the gateway keeps
+      // running the old config until an explicit apply.
+      state.configNeedsApply = true;
+      state.configAutoSaveStatus = "saved";
+    } else {
+      state.configNeedsApply = false;
+      state.configAutoSaveStatus = "idle";
+    }
     await loadConfig(state);
     return isCurrent();
   } catch (err) {
     if (isCurrent()) {
       state.lastError = String(err);
+      if (method === "config.set") {
+        state.configAutoSaveStatus = "error";
+      }
     }
     return false;
   } finally {
     if (isCurrent()) {
       state[busyKey] = false;
     }
+  }
+}
+
+/**
+ * Auto-save submission for debounced form edits. Unlike the manual
+ * `submitConfigChange` path it never raises `configSaving` (editors must stay
+ * interactive while typing) and it only clears the dirty flag when the draft
+ * still matches the submitted bytes — edits made while the request was in
+ * flight stay dirty so the trailing save picks them up.
+ */
+async function autoSaveConfig(state: ConfigState): Promise<boolean> {
+  const client = state.client;
+  if (!client || !state.connected || !state.configFormDirty || state.configFormMode !== "form") {
+    return false;
+  }
+  const connectionEpoch = currentConfigConnectionEpoch(state);
+  const isCurrent = () => isCurrentConfigConnection(state, client, connectionEpoch);
+  const submittedRaw = serializeFormForSubmit(state);
+  const baseHash = state.configDraftBaseHash ?? state.configSnapshot?.hash;
+  if (!baseHash) {
+    state.configAutoSaveStatus = "error";
+    state.lastError = "Config hash missing; reload and retry.";
+    return false;
+  }
+  state.configAutoSaveStatus = "saving";
+  state.lastError = null;
+  state.chatError = null;
+  try {
+    await client.request("config.set", { raw: submittedRaw, baseHash });
+    if (!isCurrent()) {
+      return false;
+    }
+    const drained = serializeFormForSubmit(state) === submittedRaw;
+    if (drained) {
+      state.configFormDirty = false;
+      autoAllowlistedPluginIdsByState.delete(state);
+    }
+    state.configDraftBaseHash = null;
+    state.configNeedsApply = true;
+    state.configAutoSaveStatus = "saved";
+    await loadConfig(state);
+    if (isCurrent() && state.configFormDirty) {
+      // The gateway now holds submittedRaw; rebase the surviving draft onto
+      // the fresh hash so the trailing save passes the baseHash guard.
+      state.configDraftBaseHash = state.configSnapshot?.hash ?? null;
+    }
+    return isCurrent();
+  } catch (err) {
+    if (isCurrent()) {
+      state.lastError = String(err);
+      state.configAutoSaveStatus = "error";
+    }
+    return false;
   }
 }
 
@@ -523,6 +605,9 @@ function syncConfigDraft(state: ConfigState, nextForm: Record<string, unknown>) 
   state.configForm = nextForm;
   state.configRaw = nextRaw;
   state.configFormDirty = nextRaw !== originalRaw;
+  // configFormMode tracks which draft is authoritative for submission; a form
+  // edit supersedes any earlier raw-text draft.
+  state.configFormMode = "form";
 }
 
 async function saveConfig(state: ConfigState): Promise<boolean> {
@@ -678,6 +763,9 @@ function updateConfigFormValue(state: ConfigState, path: Array<string | number>,
 
 function updateConfigRawValue(state: ConfigState, value: string) {
   state.configRaw = value;
+  // A raw-text edit becomes the authoritative draft; without this,
+  // serializeFormForSubmit would submit the stale form and drop raw edits.
+  state.configFormMode = "raw";
   state.configFormDirty = value !== state.configRawOriginal;
   if (state.configFormDirty) {
     state.configDraftBaseHash = state.configDraftBaseHash ?? state.configSnapshot?.hash ?? null;
@@ -693,6 +781,7 @@ function resetConfigPendingChanges(state: ConfigState) {
     state.configRawOriginal ??
     serializeConfigForm(state.configFormOriginal ?? editableConfig ?? {});
   state.configFormDirty = false;
+  state.configFormMode = "form";
   state.configDraftBaseHash = state.configSnapshot?.hash ?? null;
   autoAllowlistedPluginIdsByState.delete(state);
 }
@@ -823,6 +912,9 @@ export function createRuntimeConfigCapability(
   let configLoad: Promise<void> | null = null;
   let schemaLoad: Promise<void> | null = null;
   let disposed = false;
+  let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let autoSaveInFlight: Promise<unknown> | null = null;
+  let autoSaveTrailing = false;
 
   const publish = () => {
     if (disposed) {
@@ -866,6 +958,63 @@ export function createRuntimeConfigCapability(
     const current = key === "config" ? configLoad : schemaLoad;
     return current ?? trackLoad(key, run(task));
   };
+  const cancelScheduledAutoSave = () => {
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+    }
+    autoSaveTrailing = false;
+  };
+  const runAutoSave = () => {
+    if (disposed) {
+      return;
+    }
+    if (autoSaveInFlight) {
+      // Exactly one trailing save catches edits made while a save is in
+      // flight; further edits fold into that same trailing run.
+      autoSaveTrailing = true;
+      return;
+    }
+    const flight = run(() => autoSaveConfig(state))
+      .catch(() => undefined)
+      .finally(() => {
+        autoSaveInFlight = null;
+        if (autoSaveTrailing && !disposed) {
+          autoSaveTrailing = false;
+          runAutoSave();
+        }
+      });
+    autoSaveInFlight = flight;
+  };
+  const scheduleAutoSave = () => {
+    // Only form-draft edits auto-save; raw-text drafts stay manual so a
+    // half-typed JSON5 buffer never gets written to disk.
+    if (disposed || !state.configFormDirty || state.configFormMode !== "form") {
+      return;
+    }
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+    }
+    autoSaveTimer = setTimeout(() => {
+      autoSaveTimer = null;
+      runAutoSave();
+    }, CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS);
+  };
+  // Manual save/apply serialize the current draft themselves; cancel any
+  // dangling debounce and settle an in-flight autosave first so the explicit
+  // write does not race it on the baseHash guard. The submit starts
+  // synchronously when nothing is in flight so it binds to the current
+  // connection epoch.
+  const afterAutoSaveSettled = (task: () => Promise<boolean>): Promise<boolean> => {
+    cancelScheduledAutoSave();
+    const pending = autoSaveInFlight;
+    return run(async () => {
+      if (pending) {
+        await pending;
+      }
+      return task();
+    });
+  };
   const ensureLoaded = () =>
     state.configSnapshot ? Promise.resolve() : loadOnce("config", () => loadConfig(state));
   const ensureSchemaLoaded = () =>
@@ -882,10 +1031,14 @@ export function createRuntimeConfigCapability(
       // A reconnect may reuse the client object. Keep generations monotonic so work
       // from the previous connection cannot commit into the new connection epoch.
       invalidateConfigConnection(state);
+      cancelScheduledAutoSave();
       state.configLoading = false;
       state.configSchemaLoading = false;
       state.configSaving = false;
       state.configApplying = false;
+      if (state.configAutoSaveStatus === "saving") {
+        state.configAutoSaveStatus = "idle";
+      }
     }
     publish();
   });
@@ -896,31 +1049,46 @@ export function createRuntimeConfigCapability(
     },
     ensureLoaded,
     ensureSchemaLoaded,
-    refresh: (options) =>
-      trackLoad(
+    refresh: (options) => {
+      if (options?.discardPendingChanges) {
+        cancelScheduledAutoSave();
+      }
+      return trackLoad(
         "config",
         run(() => loadConfig(state, options)),
-      ),
+      );
+    },
     refreshSchema: () =>
       trackLoad(
         "schema",
         run(() => loadConfigSchema(state)),
       ),
-    patchForm: (path, value) => mutate(() => updateConfigFormValue(state, path, value)),
-    removeFormValue: (path) => mutate(() => removeConfigFormValue(state, path)),
+    patchForm: (path, value) => {
+      mutate(() => updateConfigFormValue(state, path, value));
+      scheduleAutoSave();
+    },
+    removeFormValue: (path) => {
+      mutate(() => removeConfigFormValue(state, path));
+      scheduleAutoSave();
+    },
     setRaw: (value) => mutate(() => updateConfigRawValue(state, value)),
-    resetDraft: () => mutate(() => resetConfigPendingChanges(state)),
-    save: () => run(() => saveConfig(state)),
-    apply: () => run(() => applyConfig(state)),
+    resetDraft: () => {
+      cancelScheduledAutoSave();
+      mutate(() => resetConfigPendingChanges(state));
+    },
+    save: () => afterAutoSaveSettled(() => saveConfig(state)),
+    apply: () => afterAutoSaveSettled(() => applyConfig(state)),
     openFile: () => run(() => openConfigFile(state)),
     ensureAgentEntry: (agentId) => {
       const index = ensureAgentConfigEntry(state, agentId);
       publish();
+      scheduleAutoSave();
       return index;
     },
     stageDefaultAgent: (agentId) => {
       const changed = stageDefaultAgentConfigEntry(state, agentId);
       publish();
+      scheduleAutoSave();
       return changed;
     },
     patch: (options) => run(() => patchConfig(state, options)),
@@ -931,6 +1099,7 @@ export function createRuntimeConfigCapability(
     },
     dispose() {
       disposed = true;
+      cancelScheduledAutoSave();
       invalidateConfigConnection(state);
       state.connected = false;
       state.configLoading = false;

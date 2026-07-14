@@ -169,65 +169,56 @@
   overflow: clip;
 }
 
-/* Actions Bar */
-.config-actions {
+/* Toolbar: mode toggle + inline autosave status */
+.config-toolbar {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-6) 0;
+  flex-shrink: 0;
+}
+
+.config-toolbar__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  min-height: 28px;
+}
+
+/* Restart affordance shown after a successful save until apply */
+.config-apply-banner {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 12px 18px;
-  padding: 14px 24px;
-  background: var(--bg-accent);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  position: relative;
-  z-index: 2;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--accent-subtle);
+  font-size: 12.5px;
+  color: var(--text);
 }
 
-:root[data-theme-mode="light"] .config-actions {
-  background: var(--bg-hover);
+.config-apply-banner--inset {
+  margin: var(--space-3) var(--space-5) 0;
 }
 
-.config-actions__left,
-.config-actions__right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.config-apply-banner__text {
   min-width: 0;
+  line-height: 1.4;
 }
 
-.config-actions__left {
-  flex: 1 1 280px;
-  flex-wrap: wrap;
-}
-
-.config-actions__right {
-  flex: 999 1 420px;
-  align-items: flex-start;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-}
-
-.config-actions__notice {
-  flex: 0 1 24rem;
-  max-width: 24rem;
-  line-height: 1.35;
-  text-align: right;
-}
-
-.config-actions__buttons {
+/* Raw mode file operations (open / discard / save) */
+.config-raw-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-  margin-left: auto;
-}
-
-.config-actions__buttons .btn {
-  flex: 0 0 auto;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
 }
 
 .config-action-spinner {
@@ -248,22 +239,6 @@
   .config-action-spinner svg {
     animation: none;
   }
-}
-
-.config-changes-badge {
-  padding: 4px 10px;
-  border-radius: var(--radius-full);
-  background: var(--accent-subtle);
-  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-  color: var(--accent);
-  font-size: 12px; /* was 11px */
-  font-weight: 600;
-}
-
-.config-status {
-  font-size: 12.5px;
-  color: var(--muted);
-  line-height: 1.35;
 }
 
 .config-top-tabs {
@@ -850,15 +825,9 @@
     border-radius: var(--radius-md);
   }
 
-  .config-actions {
+  .config-toolbar {
     flex-wrap: wrap;
-    padding: 14px 16px;
-  }
-
-  .config-actions__left,
-  .config-actions__right {
-    width: 100%;
-    justify-content: center;
+    padding: var(--space-3) var(--space-4) 0;
   }
 
   .config-top-tabs {
@@ -875,8 +844,8 @@
     flex: 1 1 auto;
   }
 
-  .config-actions__left .config-mode-toggle__btn {
-    flex: 1 1 50%;
+  .config-apply-banner--inset {
+    margin: var(--space-3) var(--space-4) 0;
   }
 
   .config-content {
@@ -885,32 +854,5 @@
 
   .settings-theme-grid {
     grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 900px) {
-  .config-actions {
-    padding: 12px 16px;
-  }
-
-  .config-actions__left,
-  .config-actions__right {
-    flex-basis: 100%;
-  }
-
-  .config-actions__right {
-    justify-content: flex-start;
-  }
-
-  .config-actions__notice {
-    flex-basis: 100%;
-    max-width: none;
-    text-align: left;
-  }
-
-  .config-actions__buttons {
-    width: 100%;
-    justify-content: flex-start;
-    margin-left: 0;
   }
 }

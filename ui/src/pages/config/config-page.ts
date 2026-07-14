@@ -742,7 +742,8 @@ export class ConfigPage extends OpenClawLightDomElement {
       loading: configState.configLoading,
       saving: configState.configSaving,
       applying: configState.configApplying,
-      updating: this.isUpdateBusy(),
+      autoSaveStatus: configState.configAutoSaveStatus,
+      needsApply: configState.configNeedsApply,
       connected: configState.connected,
       schema: configState.configSchema,
       schemaLoading: configState.configSchemaLoading,
@@ -765,11 +766,9 @@ export class ConfigPage extends OpenClawLightDomElement {
       onSearchChange: (query) => this.setSearchQuery(query),
       onSectionChange: (section) => this.setActiveSection(section),
       onSubsectionChange: (section) => this.setActiveSubsection(section),
-      onReload: () => void runtimeConfig.refresh({ discardPendingChanges: true }),
-      onReset: () => runtimeConfig.resetDraft(),
       onSave: () => void runtimeConfig.save(),
       onApply: () => void runtimeConfig.apply(),
-      onUpdate: () => void this.context.overlays.runUpdate(),
+      onRawDiscard: () => void runtimeConfig.refresh({ discardPendingChanges: true }),
       onOpenFile: () => void runtimeConfig.openFile(),
       version:
         this.context.config.current.serverVersion ??
@@ -827,13 +826,7 @@ export class ConfigPage extends OpenClawLightDomElement {
     }
     return renderMcp({
       configObject,
-      configDirty: configState.configFormDirty,
-      configSaving: configState.configSaving,
-      configApplying: configState.configApplying,
-      connected: configState.connected,
       pluginsHref: pathForRoute("plugins", this.context.basePath),
-      onSaveConfig: () => void runtimeConfig.save(),
-      onApplyConfig: () => void runtimeConfig.apply(),
       editor: renderConfig({
         ...props,
         activeSection: "mcp",
@@ -905,14 +898,11 @@ export class ConfigPage extends OpenClawLightDomElement {
       assistantName: appConfig.assistantIdentity.name,
       version:
         appConfig.serverVersion ?? this.context.gateway.snapshot.hello?.server?.version ?? "",
-      configDirty: runtimeConfig.state.configFormDirty,
       configLoading: runtimeConfig.state.configLoading,
       configSaving: runtimeConfig.state.configSaving,
       configApplying: runtimeConfig.state.configApplying,
       configUpdating: this.isUpdateBusy(),
-      configReady: Boolean(runtimeConfig.state.configSnapshot?.hash),
-      onResetConfig: () => runtimeConfig.resetDraft(),
-      onSaveConfig: () => void runtimeConfig.save(),
+      configNeedsApply: runtimeConfig.state.configNeedsApply,
       onApplyConfig: () => void runtimeConfig.apply(),
       onThinkingChange: (level) =>
         runtimeConfig.patchForm(["agents", "defaults", "thinkingDefault"], level),
