@@ -61,6 +61,7 @@ import {
   type CatalogNode,
 } from "./session-catalog-node-continue.js";
 import {
+  boundedCatalogString,
   catalogError,
   CatalogParamsError,
   CODEX_SESSION_CATALOG_MAX_PAGE_LIMIT,
