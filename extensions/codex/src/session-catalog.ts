@@ -81,6 +81,7 @@ import {
   readGatewayParams,
   readOptionalString,
   readPageParams,
+  requireBoundThread,
   requireOnlyKeys,
   toCatalogSession,
   unwrapNodeInvokePayload,
@@ -102,9 +103,9 @@ import {
   codexUpstreamContinueResult,
   type CodexUpstreamBaseline,
 } from "./session-upstream-marker.js";
-
 const boundCatalogSessionId = (value: unknown) =>
   boundedCatalogString(value, MAX_SESSION_ID_LENGTH);
+
 const CODEX_APP_SERVER_THREADS_CAPABILITY = "codex-app-server-threads";
 const CODEX_SUPERVISION_SESSION_KEY_PREFIX = "harness:codex:supervision:";
 
@@ -1019,8 +1020,7 @@ async function continueLocalCodexSessionInner(params: {
     threadId: params.threadId,
   });
   if (existing) {
-    // Local adoptions always carry a bound thread; source is a defensive fallback.
-    const boundThreadId = existing.boundThreadId ?? params.threadId;
+    const boundThreadId = requireBoundThread(existing);
     const boundThread = await params.control.readThread(boundThreadId, true);
     if (boundThread.id !== boundThreadId) {
       throw new Error("Codex app-server returned a different thread than requested");
@@ -1076,7 +1076,7 @@ async function continueLocalCodexSessionInner(params: {
     sourceThread,
     connectionFingerprint,
   });
-  const boundThreadId = adopted.boundThreadId ?? sourceThread.id;
+  const boundThreadId = requireBoundThread(adopted);
   const baselineThread =
     boundThreadId === sourceThread.id
       ? sourceThread
