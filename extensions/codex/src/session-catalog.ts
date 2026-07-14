@@ -103,6 +103,8 @@ import {
   type CodexUpstreamBaseline,
 } from "./session-upstream-marker.js";
 
+const boundCatalogSessionId = (value: unknown) =>
+  boundedCatalogString(value, MAX_SESSION_ID_LENGTH);
 const CODEX_APP_SERVER_THREADS_CAPABILITY = "codex-app-server-threads";
 const CODEX_SUPERVISION_SESSION_KEY_PREFIX = "harness:codex:supervision:";
 
@@ -894,9 +896,7 @@ async function createOrReuseAdoptedSession(params: {
   try {
     const label = params.sourceThread.name?.trim() || undefined;
     const spawnedCwd = params.sourceThread.cwd?.trim() || undefined;
-    const pendingLastTurnId = codexLastTerminalTurnId(params.sourceThread, (value) =>
-      boundedCatalogString(value, MAX_SESSION_ID_LENGTH),
-    );
+    const pendingLastTurnId = codexLastTerminalTurnId(params.sourceThread, boundCatalogSessionId);
     const marker: CodexSupervisionMarker = { sourceThreadId: params.sourceThread.id };
     const created = await params.api.runtime.agent.session.createSessionEntry({
       cfg: params.config,
@@ -1019,8 +1019,7 @@ async function continueLocalCodexSessionInner(params: {
     threadId: params.threadId,
   });
   if (existing) {
-    // Local adoptions always carry a bound thread; fall back to the source thread
-    // for defensive completeness (node entries never reach this local path).
+    // Local adoptions always carry a bound thread; source is a defensive fallback.
     const boundThreadId = existing.boundThreadId ?? params.threadId;
     const boundThread = await params.control.readThread(boundThreadId, true);
     if (boundThread.id !== boundThreadId) {
@@ -1053,9 +1052,7 @@ async function continueLocalCodexSessionInner(params: {
     if (connectionFingerprint) {
       params.onContinued?.({
         connectionFingerprint,
-        ...codexUpstreamBaseline(boundThread, (value) =>
-          boundedCatalogString(value, MAX_SESSION_ID_LENGTH),
-        ),
+        ...codexUpstreamBaseline(boundThread, boundCatalogSessionId),
       });
     }
     return { sessionKey: existing.key, disposition: "existing" };
@@ -1089,9 +1086,7 @@ async function continueLocalCodexSessionInner(params: {
   }
   params.onContinued?.({
     connectionFingerprint,
-    ...codexUpstreamBaseline(baselineThread, (value) =>
-      boundedCatalogString(value, MAX_SESSION_ID_LENGTH),
-    ),
+    ...codexUpstreamBaseline(baselineThread, boundCatalogSessionId),
   });
   return { sessionKey: adopted.key, disposition: "forked" };
 }
@@ -1316,24 +1311,7 @@ function registerCodexSessionCatalog(params: {
           upstreamBaseline = baseline;
         },
       });
-      return {
-        sessionKey: continued.sessionKey,
-        ...(upstreamBaseline
-          ? {
-              upstream: {
-                kind: "codex-app-server" as const,
-                ref: {
-                  connectionFingerprint: upstreamBaseline.connectionFingerprint,
-                  threadId: request.threadId,
-                },
-                marker: {
-                  turnId: upstreamBaseline.turnId,
-                  userMessageCount: upstreamBaseline.userMessageCount,
-                },
-              },
-            }
-          : {}),
-      };
+      return codexUpstreamContinueResult(continued.sessionKey, request.threadId, upstreamBaseline);
     },
     checkUpstreamActivity: upstream.createChecker(params),
     archive: async (request) => {

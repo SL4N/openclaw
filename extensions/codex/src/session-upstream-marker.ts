@@ -1,3 +1,4 @@
+import type { SessionCatalogContinueProviderResult } from "openclaw/plugin-sdk/session-catalog";
 import type { CodexThread, CodexTurn } from "./app-server/protocol.js";
 
 export type CodexUpstreamBaseline = {
@@ -50,4 +51,23 @@ export function codexLastTerminalTurnId(
     }
   }
   return undefined;
+}
+
+/** Build the upstream link seed for a continued Codex session, if a baseline exists. */
+export function codexUpstreamContinueResult(
+  sessionKey: string,
+  threadId: string,
+  baseline: (CodexUpstreamBaseline & { connectionFingerprint: string }) | undefined,
+): { sessionKey: string; upstream?: SessionCatalogContinueProviderResult["upstream"] } {
+  if (!baseline) {
+    return { sessionKey };
+  }
+  return {
+    sessionKey,
+    upstream: {
+      kind: "codex-app-server",
+      ref: { connectionFingerprint: baseline.connectionFingerprint, threadId },
+      marker: { turnId: baseline.turnId, userMessageCount: baseline.userMessageCount },
+    },
+  };
 }
